@@ -1,0 +1,306 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from ta.volatility import BollingerBands
+from ta.momentum import RSIIndicator
+import matplotlib.pyplot as plt
+import pyperclip
+
+# Define date range for data fetching
+start_date = "2010-06-20"
+end_date = "2025-06-20"
+
+# Fetch SOXL data
+ticker = "SOXL"
+data = yf.download(ticker, start=start_date, end=end_date, interval="1d", auto_adjust=False)
+
+# Fetch VIX data
+vix_ticker = "^VIX"
+vix_data = yf.download(vix_ticker, start=start_date, end=end_date, interval="1d", auto_adjust=False)
+
+# Handle multi-index columns if present
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+# Handle VIX data columns
+if isinstance(vix_data.columns, pd.MultiIndex):
+    vix_data.columns = vix_data.columns.get_level_values(0)
+vix_data = vix_data[['Close']].rename(columns={'Close': 'VIX_Close'})
+
+# Merge VIX data with SOXL data
+data = data.join(vix_data, how='left')
+
+# Calculate Bollinger Bands (20-day, 2 std dev)
+bb_indicator = BollingerBands(close=data['Close'], window=20, window_dev=2)
+data['BB_upper'] = bb_indicator.bollinger_hband()
+data['BB_lower'] = bb_indicator.bollinger_lband()
+
+# Calculate RSI (14-day)
+rsi_indicator = RSIIndicator(close=data['Close'], window=14)
+data['RSI'] = rsi_indicator.rsi()
+
+# Calculate 9-day SMA of RSI
+data['RSI_MA'] = data['RSI'].rolling(window=9).mean()
+
+# Initialize signal and position columns
+data['Buy_Signal'] = False
+data['Sell_Signal'] = False
+data['Position'] = 0
+data['Preliminary_Sell'] = False
+
+# Drop rows with NaN values
+data = data.dropna()
+
+# Generate buy and sell signals
+for i in range(2, len(data)):
+    # Buy Conditions
+    cond_a = (data['Close'].iloc[i - 1] < data['BB_lower'].iloc[i - 1] and
+              data['Close'].iloc[i - 2] < data['BB_lower'].iloc[i - 2])
+    cond_b = (data['RSI'].iloc[i - 1] <= 32.5 or data['RSI'].iloc[i - 2] <= 32.5)
+    cond_vix = data['VIX_Close'].iloc[i] >= 50
+    if (cond_a and cond_b) or cond_vix:
+        data.loc[data.index[i], 'Buy_Signal'] = True
+
+    # Sell Conditions
+    prelim_a = (data['Close'].iloc[i - 1] > data['BB_upper'].iloc[i - 1] and
+                data['Close'].iloc[i] < data['BB_upper'].iloc[i])
+    prelim_b = (data['RSI'].iloc[i - 1] >= 70 or data['RSI'].iloc[i] >= 70)
+    if prelim_a and prelim_b:
+        data.loc[data.index[i], 'Preliminary_Sell'] = True
+
+    if (data['Preliminary_Sell'].iloc[i] or
+            (i > 0 and data['Preliminary_Sell'].iloc[i - 1])):
+        if (i > 1 and data['RSI'].iloc[i - 1] > data['RSI_MA'].iloc[i - 1] and
+                data['RSI'].iloc[i] <= data['RSI_MA'].iloc[i]):
+            data.loc[data.index[i], 'Sell_Signal'] = True
+
+# Print total signals
+total_buy_signals = data['Buy_Signal'].sum()
+total_sell_signals = data['Sell_Signal'].sum()
+print(f"Total Buy Signals: {total_buy_signals}")
+print(f"Total Sell Signals: {total_sell_signals}")
+
+# Trading simulation: 50.0000001% DCA
+initial_capital = 100000
+cash = initial_capital
+positions = []  # List of open positions: {'date': date, 'price': price, 'shares': shares}
+equity = []
+trades = []  # List of trades: {'Date': date, 'Type': type, 'Price': price, 'Shares': shares}
+allocation_pct = 0.5000000010
+
+try:
+    for i in range(len(data)):
+        current_date = data.index[i]
+        current_price = data['Close'].iloc[i]
+
+        if data['Buy_Signal'].iloc[i]:
+            # Buy: Allocate 50.0000001% of available cash
+            investment = cash * allocation_pct
+            if investment >= 100:
+                shares_to_buy = investment / current_price
+                cash -= investment
+                positions.append({
+                    'date': current_date,
+                    'price': current_price,
+                    'shares': shares_to_buy
+                })
+                trades.append({
+                    'Date': current_date,
+                    'Type': 'Buy',
+                    'Price': current_price,
+                    'Shares': shares_to_buy
+                })
+                total_shares = sum(pos['shares'] for pos in positions)
+                print(f"Buy on {current_date.date()} at {current_price:.2f}, Shares: {shares_to_buy:.2f}, Remaining Shares: {total_shares:.2f}")
+
+        elif data['Sell_Signal'].iloc[i] and positions:
+            # Sell: Sell 50.0000001% of shares from each open position
+            total_shares_sold = 0
+            new_positions = []
+            for pos in positions:
+                shares_to_sell = pos['shares'] * allocation_pct
+                total_shares_sold += shares_to_sell
+                cash += shares_to_sell * current_price
+                remaining_shares = pos['shares'] - shares_to_sell
+                if remaining_shares > 0:
+                    new_positions.append({
+                        'date': pos['date'],
+                        'price': pos['price'],
+                        'shares': remaining_shares
+                    })
+            positions = new_positions
+            if total_shares_sold > 0:
+                trades.append({
+                    'Date': current_date,
+                    'Type': 'Sell',
+                    'Price': current_price,
+                    'Shares': total_shares_sold
+                })
+                total_shares = sum(pos['shares'] for pos in positions)
+                print(f"Sell on {current_date.date()} at {current_price:.2f}, Shares: {total_shares_sold:.2f}, Remaining Shares: {total_shares:.2f}")
+
+        # Update position and equity
+        total_shares = sum(pos['shares'] for pos in positions)
+        data.loc[current_date, 'Position'] = total_shares
+        current_equity = cash + total_shares * current_price
+        equity.append(current_equity)
+
+except Exception as e:
+    print(f"Error during trading simulation: {e}")
+
+# Add equity to dataframe
+data['Equity'] = equity
+
+# Buy-and-hold performance
+buy_and_hold_equity = initial_capital * data['Close'] / data['Close'].iloc[0]
+buy_and_hold_return = (buy_and_hold_equity.iloc[-1] / initial_capital - 1) * 100
+print(f"Initial SOXL Price: {data['Close'].iloc[0]:.2f}")
+
+# Corrected win rate calculation
+wins = 0
+total_sells = len([t for t in trades if t['Type'] == 'Sell'])
+temp_positions = []
+
+for trade in trades:
+    if trade['Type'] == 'Buy':
+        temp_positions.append({
+            'date': trade['Date'],
+            'price': trade['Price'],
+            'shares': trade['Shares']
+        })
+    elif trade['Type'] == 'Sell':
+        total_cost = 0
+        total_shares_sold = 0
+        new_temp_positions = []
+        for pos in temp_positions:
+            sell_shares = pos['shares'] * allocation_pct
+            if sell_shares > 0:
+                total_cost += sell_shares * pos['price']
+                total_shares_sold += sell_shares
+                remaining_shares = pos['shares'] - sell_shares
+                if remaining_shares > 0:
+                    new_temp_positions.append({
+                        'date': pos['date'],
+                        'price': pos['price'],
+                        'shares': remaining_shares
+                    })
+        temp_positions = new_temp_positions
+        if total_shares_sold > 0:
+            avg_cost_basis = total_cost / total_shares_sold
+            sell_price = trade['Price']
+            if sell_price > avg_cost_basis:
+                wins += 1
+
+win_rate = (wins / total_sells) * 100 if total_sells > 0 else 0
+
+# Maximum drawdown calculations
+# Strategy maximum drawdown
+running_max = data['Equity'].cummax()
+drawdowns = (data['Equity'] - running_max) / running_max
+strategy_max_drawdown = drawdowns.min() * 100
+
+# Buy-and-hold maximum drawdown
+running_max_bh = buy_and_hold_equity.cummax()
+drawdowns_bh = (buy_and_hold_equity - running_max_bh) / running_max_bh
+buy_and_hold_max_drawdown = drawdowns_bh.min() * 100
+
+# Performance metrics
+total_return = (equity[-1] / initial_capital - 1) * 100 if equity else 0
+num_trades = len([t for t in trades if t['Type'] == 'Buy'])
+performance_metrics = (
+    f"Performance Metrics:\n"
+    f"Total Return: {total_return:.2f}%\n"
+    f"Buy-and-Hold Return: {buy_and_hold_return:.2f}%\n"
+    f"Number of Trades: {num_trades}\n"
+    f"Win Rate: {win_rate:.2f}%\n"
+    f"Strategy Maximum Drawdown: {strategy_max_drawdown:.2f}%\n"
+    f"Buy-and-Hold Maximum Drawdown: {buy_and_hold_max_drawdown:.2f}%"
+)
+
+print(performance_metrics)
+try:
+    pyperclip.copy(performance_metrics)
+    print("Performance Metrics copied to clipboard!")
+except Exception as e:
+    print(f"Failed to copy to clipboard: {e}")
+
+# Additional performance metrics
+# Calculate daily returns
+strategy_returns = data['Equity'].pct_change().dropna()
+benchmark_returns = buy_and_hold_equity.pct_change().dropna()
+
+# Align returns
+aligned_data = pd.concat([strategy_returns, benchmark_returns], axis=1).dropna()
+strategy_returns = aligned_data.iloc[:, 0]
+benchmark_returns = aligned_data.iloc[:, 1]
+
+# Risk-free rate (annualized)
+risk_free_rate = 0.04
+
+# Years
+start_date = pd.to_datetime("2010-06-20")
+end_date = pd.to_datetime("2025-06-20")
+years = (end_date - start_date).days / 365.25
+
+# CAGR
+final_equity = data['Equity'].iloc[-1]
+initial_equity = initial_capital
+strategy_cagr = (final_equity / initial_equity) ** (1 / years) - 1
+final_benchmark_equity = buy_and_hold_equity.iloc[-1]
+benchmark_cagr = (final_benchmark_equity / initial_equity) ** (1 / years) - 1
+
+# Beta
+cov_matrix = np.cov(strategy_returns, benchmark_returns)
+beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+
+# Alpha (annualized)
+alpha = strategy_cagr - (risk_free_rate + beta * (benchmark_cagr - risk_free_rate))
+
+# Expected Return
+mean_daily_return = strategy_returns.mean()
+expected_return = (1 + mean_daily_return) ** 252 - 1
+
+# Sharpe Ratio
+daily_volatility = strategy_returns.std()
+annualized_volatility = daily_volatility * np.sqrt(252)
+sharpe_ratio = (expected_return - risk_free_rate) / annualized_volatility if annualized_volatility != 0 else 0
+
+# Volatility Comparison
+strategy_volatility = annualized_volatility * 100
+buy_and_hold_volatility = benchmark_returns.std() * np.sqrt(252) * 100
+volatility_comparison = (
+    "The strategy is less volatile than buy-and-hold"
+    if strategy_volatility < buy_and_hold_volatility
+    else "The strategy is more volatile than buy-and-hold"
+)
+
+# Print additional metrics
+print(f"\nAdditional Performance Metrics:")
+print(f"Alpha (Annualized): {alpha * 100:.2f}%")
+print(f"Beta: {beta:.2f}")
+print(f"CAGR: {strategy_cagr * 100:.2f}%")
+print(f"Expected Return (Annualized): {expected_return * 100:.2f}%")
+print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+print(f"Strategy Volatility (Annualized): {strategy_volatility:.2f}%")
+print(f"Buy-and-Hold Volatility (Annualized): {buy_and_hold_volatility:.2f}%")
+print(volatility_comparison)
+
+# Plot results
+plt.figure(figsize=(14, 7))
+plt.subplot(2, 1, 1)
+plt.plot(data.index, data['Close'], label='SOXL Close Price')
+plt.plot(data.index, data['BB_upper'], label='Upper BB', linestyle='--')
+plt.plot(data.index, data['BB_lower'], label='Lower BB', linestyle='--')
+plt.scatter(data.index[data['Buy_Signal']], data['Close'][data['Buy_Signal']], marker='^', color='g', label='Buy')
+plt.scatter(data.index[data['Sell_Signal']], data['Close'][data['Sell_Signal']], marker='v', color='r', label='Sell')
+plt.title("Yoyo's First SOXL Strategy")
+plt.legend()
+
+plt.subplot(2, 1, 2)
+plt.plot(data.index, data['Equity'], label='Strategy Equity', color='purple')
+plt.plot(data.index, buy_and_hold_equity, label='Buy-and-Hold Equity', color='blue', linestyle='--')
+plt.title('Equity Curve vs. Buy-and-Hold')
+plt.legend()
+plt.tight_layout()
+plt.show()
