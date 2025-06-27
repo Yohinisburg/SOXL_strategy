@@ -62,27 +62,19 @@ d) 5 years (from 2020-01-01 to 2025-06-20):
 
 
 # Uses of Machine Learning and Optimization in the algorithm
-a) Hyperparameter Optimization using scikit-optimize (Bayesian Optimization)
-b) Grid Search
-c) Scipy Optimization for continuous parameter fine-tuning
-d) Monte Carlo Simulations
+1. Hyperparameter Optimization using scikit-optimize (Bayesian Optimization)
+2. Grid Search
+3. Scipy Optimization for continuous parameter fine-tuning
+4. Monte Carlo Simulations
 
-# Challenges I ran into: 
-a) SOXL is a relatively young financial product as it was listed on NYSE just a little over 15 years ago. Thus, we were not able to backtest SOXL's performance during the extremely volatile 2002 Dot Com Bubble Bust and 2008 Financial Crisis. 
-b) There were minor discrepancies with RSI and Bollinger Bands data from Python's yfinance library and the online platform TradingView, but I adhered to yfinance data.
+# Limitations: 
+1. SOXL is a relatively young financial product as it was listed on NYSE just a little over 15 years ago. Thus, we were not able to backtest SOXL's performance during the extremely volatile 2002 Dot Com Bubble Bust and 2008 Financial Crisis.
+2. There were minor discrepancies with RSI and Bollinger Bands data from Python's yfinance library and the online platform TradingView, but I adhered to yfinance data.
 
 # Get Started
-  1. Install necessary libraries/packages
-     pip install yfinance pandas numpy matplotlib scipy scikit-optimize ta
+  1. Install necessary libraries:
+     <pre> pip install yfinance pandas numpy matplotlib scipy scikit-optimize ta </pre>
   2. Modify the start_date and end_date to test the strategy's performance for various periods.
-
-
-
-
-
-
-
-
 
 
 
